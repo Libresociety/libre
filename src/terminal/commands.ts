@@ -1,4 +1,6 @@
-import { games, type Game } from '../catalog';
+import { games as localGames, type Game } from '../catalog';
+let games: Game[] = [...localGames];
+export function setGameCatalog(catalog: Game[]): void { games = [...catalog].sort((a, b) => a.title.localeCompare(b.title)); }
 export const themes = ['green', 'amber', 'ice'] as const;
 export type Theme = typeof themes[number];
 export interface Result { lines: string[]; games?: Game[]; clear?: boolean; theme?: Theme; launch?: Game }
@@ -19,7 +21,7 @@ export function tokenize(input: string): string[] {
 }
 const registry: Record<string, Command> = {
   help: { usage: 'help [command]', description: 'Your field guide to the network', run: ([name]) => name ? registry[name] ? out(registry[name].usage, registry[name].description) : out(`No help for “${name}”. Type help to see commands.`) : out('AVAILABLE COMMANDS', ...Object.values(registry).map(c => `${c.usage.padEnd(28)} ${c.description}`), '', '↑ / ↓ history   ·   Tab autocomplete   ·   Ctrl+L clear   ·   Esc cancel') },
-  about: { usage: 'about', description: 'What is this place?', run: () => out('UNDERGROUND TERMINAL NETWORK / v0.1.0', 'A small corner of the internet for curious minds and study breaks.', 'An unofficial student-oriented network. No school affiliation.', 'Phase 1: local game directory. No accounts, tracking, or chat backend.', 'Respect creators, community rules, and your organization’s network policies.') },
+  about: { usage: 'about', description: 'What is this place?', run: () => out('LIBRESOCIETY / COMMUNITY TERMINAL', 'An independent online society for games and curious minds.', 'No school affiliation. Respect creators, community rules, and your organization’s network policies.') },
   clear: { usage: 'clear', description: 'Start with a clean screen', run: () => ({ lines: [], clear: true }) },
   games: { usage: 'games [search|info|category]', description: 'Explore the browser game directory', run: ([action, ...rest]) => {
     if (!action) return { lines: [`DIRECTORY / ${games.length} games`, 'Use games info <id> for details or play <id> to launch.'], games };
@@ -32,6 +34,13 @@ const registry: Record<string, Command> = {
   } },
   play: { usage: 'play <id>', description: 'Launch a game in a new tab', run: ([id]) => { const game = games.find(g => g.id === id?.toLowerCase()); return game ? { lines: [`Launching ${game.title}. Your terminal stays right here.`], launch: game } : out(id ? `Unknown game “${id}”. Type games to find an ID.` : 'Usage: play <id>'); } },
   theme: { usage: 'theme <green|amber|ice>', description: 'Change the phosphor color', run: ([name]) => themes.includes(name as Theme) ? { lines: [`Theme set to ${name}.`], theme: name as Theme } : out('Available themes: green, amber, ice. Example: theme amber') },
+  login: { usage: 'login', description: 'Sign in to your account', run: () => out('Enter your username and password in the secure sign-in form below.') },
+  register: { usage: 'register', description: 'Create an account', run: () => out('Choose a username and password in the secure registration form below. Passwords need at least 12 characters.') },
+  profile: { usage: 'profile', description: 'View your account profile', run: () => out('Sign in to view your profile.') },
+  submit: { usage: 'submit', description: 'Suggest a game for review', run: () => out('Sign in to submit a game suggestion for moderator review.') },
+  channels: { usage: 'channels', description: 'List public chat channels', run: () => out('general · games · study · Type chat <channel> to join. Sign in to post.') },
+  chat: { usage: 'chat [channel]', description: 'View public chat or choose a channel', run: ([channel]) => out(`Public chat${channel ? ` / ${channel}` : ''}. Sign in to post messages.`) },
+  who: { usage: 'who', description: 'View active chat users', run: () => out('Presence is available while viewing a chat channel.') },
   history: { usage: 'history', description: 'Show commands from this session', run: (_, ctx) => out(...ctx.history.map((line, i) => `${String(i + 1).padStart(3)}  ${line}`)) },
   sudo: { usage: 'sudo', description: 'Ask the machine nicely', run: () => out('guest is not in the sudoers file. Nice try, explorer.') },
 };

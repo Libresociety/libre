@@ -1,0 +1,3 @@
+# Copy to worker/.dev.vars for local signup email tests. Never commit that file.
+RESEND_API_KEY=replace-with-your-Resend-API-key
+SIGNUP_NOTICE_TO=the-email-address-used-for-your-Resend-account

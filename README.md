@@ -1,27 +1,29 @@
-# Underground Terminal Network
+# LibreSociety
 
-A terminal-first, unofficial student game directory built with React, TypeScript, and Vite. **Phase 1 only:** entirely static, no backend, account, telemetry, or paid API. Game listings link to original creators; no game files are redistributed or embedded.
+LibreSociety is an independent terminal-first community for games and curious minds, built with React, TypeScript, Vite, Cloudflare Workers, and D1.
 
 ## Local development
 
-Use Node.js 22.12+ (Node 24 recommended) and npm.
+Use Node.js 22.12+ and npm.
 
 ```sh
 npm ci
+npm run db:migrate:local
 npm run dev
 ```
 
-Open the URL printed by Vite (normally http://localhost:5173).
+`npm run dev` starts both the Vite frontend and the local Wrangler Worker. Open the URL printed by Vite (normally http://localhost:5173). Vite proxies `/api` to the local Worker on port 8787. Wrangler runs D1 locally; no Cloudflare login is needed for local development. Set `VITE_API_URL` only when pointing the built frontend at a deployed Worker. The app falls back to its local sample catalog if the API cannot be reached.
+
+Local Wrangler does not inherit Cloudflare Worker secrets. To test sign-up email locally, copy `worker/.dev.vars.example` to `worker/.dev.vars` and enter your Resend API key and the email registered with Resend there. That file is ignored by Git. Production secrets are separate and are configured with `wrangler secret put`.
 
 ```sh
 npm test
 npm run build
-npm run preview
 ```
 
-Build output is `dist/`. Relative asset paths support both root and repository-subpath hosting. No environment variables are needed; `.env.example` documents this. Never put secrets in Vite client variables.
+Build output is `dist/`. Never put secrets in `VITE_*` variables; Vite bundles them into public client code.
 
-## Commands
+## Terminal commands
 
 | Command | Behavior |
 | --- | --- |
@@ -36,49 +38,58 @@ Build output is `dist/`. Relative asset paths support both root and repository-s
 | `theme green`, `theme amber`, `theme ice` | Save color preference locally |
 | `history` | Show current session’s commands |
 
-Try `games search puzzle`, `games info 2048`, and `play 2048`. Quoted arguments are supported. Invalid commands suggest nearby spellings. An explicit launch link remains available if the browser blocks a popup. External games have their own policies and availability; returning to the original tab returns to the terminal. This application does not bypass network policies.
+Try `games search puzzle`, `games info 2048`, and `play 2048`. Invalid commands suggest nearby spellings. External games remain on their original creator sites; no game code is redistributed or embedded.
 
-Keyboard: Up/Down recall history (including restoring an unfinished draft); Tab completes commands, game IDs, and themes; Ctrl+L clears output; Escape or Ctrl+U clears the input. When no completion matches, Tab retains normal focus navigation. Quick-start buttons and game launch links provide touch access. History is in memory, capped at 100 commands; output is capped at 150 entries. Only theme preference persists in local storage; storage failures are tolerated. All command output is rendered as React text, never HTML.
+## Cloudflare setup and deployment
 
-## Free deployment: Cloudflare Pages
+Cloudflare account authentication is required only to create the hosted D1 database and deploy the Worker/Pages project. Do not configure a paid plan or provide a payment method; verify the current free plan eligibility and quotas in your account before deployment. Local development above does not need an account.
 
-Hosting is a user deployment step; this repository has not been published automatically.
+1. Install dependencies with `npm ci` and authenticate using `npx wrangler login` (browser login) or a scoped API token in your shell environment. Do not commit the token.
+2. Create a D1 database: `npm run db:create`. Copy the returned database ID into `worker/wrangler.toml`, replacing `REPLACE_WITH_DATABASE_ID`.
+3. Apply the migration remotely: `npm run db:migrate:remote`.
+4. Deploy the API: `npm run worker:deploy`. It will be available at `https://underground-terminal-api.<your-account>.workers.dev`.
+5. For the Pages frontend, configure `VITE_API_URL` to that Worker URL in the Pages build environment, then build with `npm run build` and use `dist` as the output directory. Alternatively, deploy the static output with GitHub Pages. Without the variable, the static sample directory works.
+6. Optionally set `ALLOWED_ORIGIN` in `worker/wrangler.toml` to the exact Pages origin and redeploy. Leaving it unset permits public browser origins, which is suitable for a public read-only API.
 
-1. Push the repository to GitHub or GitLab.
-2. Create a Cloudflare account and choose **Workers & Pages → Create → Pages → Import an existing Git repository** (dashboard labels may change).
-3. Choose the Free plan, repository, and production branch. Build command: `npm run build`; output directory: `dist`; project root: repository root. Use Node 24 for the build environment.
-4. Deploy. Use the provided `https://<project>.pages.dev` address. No custom domain, Workers, database, or payment method is needed for Phase 1.
+### Manual signup requests and private email notifications
 
-Cloudflare advertises Pages as free to start without a credit card: [Pages product page](https://www.cloudflare.com/products/pages/). The published Free plan limits include 500 builds/month, one concurrent build, 20,000 files/site, and 25 MiB per asset; stay within current limits. Static asset requests do not use Workers API quotas. Review [Pages limits](https://developers.cloudflare.com/pages/platform/limits/) and [build configuration](https://developers.cloudflare.com/pages/configuration/build-configuration/) before deployment (checked November 14, 2026). `public/_headers` supplies security headers on Pages.
+The public sign-up form stores a pending request with a salted password hash and sends a notification to the private destination configured in Worker secrets. No inbox address belongs in this repository or frontend configuration. Direct account creation is disabled. Approve a request manually by copying its ID from the notification and running the SQL below with that ID in place of `REQUEST_ID`:
 
-If onboarding asks for a payment method, do not enable a paid plan: use the public-repository GitHub Pages fallback below. Later phases must independently verify Workers/D1/Durable Objects eligibility, quotas, and payment requirements before selecting infrastructure.
+```sh
+npx wrangler d1 execute underground-terminal --remote --config worker/wrangler.toml --command "INSERT INTO users(id,username,password_salt,password_hash) SELECT id,username,password_salt,password_hash FROM signup_requests WHERE id='REQUEST_ID' AND status='pending'; UPDATE signup_requests SET status='approved' WHERE id='REQUEST_ID' AND status='pending';"
+```
 
-## Free fallback: GitHub Pages
+Reject it by setting `status='rejected'` for that request ID. The account becomes usable after approval, with the password hash supplied in the original request.
 
-Use a **public repository on GitHub Free**, without paid Actions runners or a custom domain. The included `.github/workflows/pages.yml` is manually triggered to avoid unexpected publication.
+Email delivery uses Resend's test sender, which does not need a custom domain but only delivers to the email address registered to your Resend account. Create a free Resend account using your private inbox, then create an API key. The free Resend plan has a published 3,000 monthly email quota with a 100 per day cap. Keep signup requests low volume and disable paid overages in Resend settings. Set the private values in Worker secrets, never in source control:
 
-1. Push these files to your public repository.
-2. Open repository **Settings → Pages → Build and deployment → Source → GitHub Actions**.
-3. In **Actions**, select **Deploy static site**, then **Run workflow** on your intended branch.
-4. Open `https://<username>.github.io/<repository>/` after deployment completes.
+```sh
+npx wrangler secret put SIGNUP_NOTICE_TO --config worker/wrangler.toml
+npx wrangler secret put RESEND_API_KEY --config worker/wrangler.toml
+```
 
-GitHub Pages is available for public repositories on GitHub Free; its published limits include a 1 GB published site and a soft 100 GB/month bandwidth limit. See [GitHub Pages limits](https://docs.github.com/en/pages/getting-started-with-github-pages/github-pages-limits). This project requires no paid feature. Cloudflare `_headers` is ignored by GitHub Pages; its platform controls response headers.
+Use the same email address for `SIGNUP_NOTICE_TO` and your Resend account email. The Worker sends from Resend's shared test address. Until both secrets are set, signup requests return a configuration error and no account is created. Do not put the inbox address or API key in `wrangler.toml`, frontend variables, or source control. Resend's shared sender only allows sending to the account's own email; sending to other recipients requires a verified domain. See [Resend pricing](https://resend.com/pricing) and [test email sending](https://resend.com/changelog/sending-test-emails).
+
+The API exposes `GET /api/health` and `GET /api/games` with optional `q` or `category` query parameters. Responses are capped at 100 rows. The endpoint is read-only; future submission endpoints must add validation, moderation, abuse controls, and authentication before accepting writes. D1 schema and sample seed data are in `worker/migrations/0001_create_games.sql`.
+
+## Free static hosting fallback
+
+The static frontend can still be hosted on Cloudflare Pages or GitHub Pages without the API. Push the repository and follow the GitHub Actions workflow under `.github/workflows/pages.yml`, or import the repository into Cloudflare Pages with build command `npm run build` and output directory `dist`. The static catalog is used whenever `VITE_API_URL` is unset or the API is unavailable.
 
 ## Source map
 
-- `src/main.tsx`: accessible terminal UI, session history, keyboard handling, safe external launches.
-- `src/style.css`: responsive terminal layout and green/amber/ice themes, system monospace fonts.
-- `src/terminal/commands.ts`: pure parser, command registry, completion, typed command results.
-- `src/terminal/commands.test.ts`: parser, searching, validation, completion, catalog, and action tests.
-- `src/catalog.ts`: typed, local sample directory with creator credits and original HTTPS URLs.
+- `src/main.tsx`: responsive terminal UI and API loading with local fallback.
+- `src/terminal/commands.ts`: pure command parser, completion, and typed results.
+- `src/catalog.ts`: local fallback sample catalog.
+- `worker/src/index.ts`: Cloudflare Worker API with D1-backed listing reads.
+- `worker/migrations/0001_create_games.sql`: D1 schema, indexes, and sample records.
+- `worker/wrangler.toml`: Worker and D1 configuration.
 - `public/_headers`: Cloudflare Pages security headers.
-- `vite.config.ts`, `tsconfig.json`, `package.json`, `package-lock.json`: toolchain and reproducible dependencies.
-- `.github/workflows/pages.yml`: optional manually triggered GitHub Pages deployment.
 
-To extend the directory, add entries to `src/catalog.ts` with unique IDs and original HTTPS URLs. Add commands through the typed registry; keep parsing independent from browser effects. React renders text safely, and only allowlisted catalog destinations can be launched.
+## Remaining phases
 
-## Scope and next phases
+- Phase 3: accounts, secure authentication, profiles, and moderated game submissions.
+- Phase 4: real-time public chat, moderation, reporting, and presence.
+- Phase 5: profiles, favorites, and final polish.
 
-Complete in Phase 1: terminal UI, local game directory, modular parser, required commands, keyboard controls, responsive themes, static deployment configuration, and core tests.
-
-Not implemented: backend persistence (Phase 2), authentication and submissions (Phase 3), public chat and moderation (Phase 4), profiles/favorites and advanced features (Phase 5). No online presence or fake chat is shown. Backend API interfaces, migrations, authentication, and moderation belong to their respective phases. Do not treat this phase as a production community service with accounts. Phase 2 has not been started.
+No accounts, user-submitted listings, private messages, or chat are implemented yet.

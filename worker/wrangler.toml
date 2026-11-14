@@ -1,0 +1,13 @@
+name = "underground-terminal-api"
+main = "src/index.ts"
+compatibility_date = "2026-11-13"
+
+[[d1_databases]]
+binding = "DB"
+database_name = "underground-terminal"
+database_id = "b92f0075-5bf2-40e2-b767-606ab3f9fe18"
+migrations_dir = "migrations"
+
+[vars]
+# Optional: set to the deployed Pages origin to restrict browser access.
+# ALLOWED_ORIGIN = "https://your-project.pages.dev"

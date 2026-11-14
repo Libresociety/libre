@@ -9,6 +9,8 @@ concurrency:
 jobs:
   build:
     runs-on: ubuntu-latest
+    env:
+      VITE_API_URL: https://underground-terminal-api.underground-terminal-network.workers.dev
     steps:
       - uses: actions/checkout@v4
       - uses: actions/setup-node@v4
