@@ -53,7 +53,9 @@ Cloudflare account authentication is required only to create the hosted D1 datab
 
 ### Manual signup requests and private email notifications
 
-The public sign-up form stores a pending request with a salted password hash and sends a notification to the private destination configured in Worker secrets. No inbox address belongs in this repository or frontend configuration. Direct account creation is disabled. Approve a request manually by copying its ID from the notification and running the SQL below with that ID in place of `REQUEST_ID`:
+The public sign-up form stores a pending request with a salted password hash and sends a notification to the private destination configured in Worker secrets. No inbox address belongs in this repository or frontend configuration. Direct account creation is disabled. Each notification includes copy-paste `APPROVE` and `DENY` Wrangler commands scoped to its request ID. Run the chosen command from the repository root with Wrangler authenticated.
+
+For reference, approval inserts the pending account only if its username has not been claimed, then marks the request approved. Denial only changes the matching pending request:
 
 ```sh
 npx wrangler d1 execute underground-terminal --remote --config worker/wrangler.toml --command "INSERT INTO users(id,username,password_salt,password_hash) SELECT id,username,password_salt,password_hash FROM signup_requests WHERE id='REQUEST_ID' AND status='pending'; UPDATE signup_requests SET status='approved' WHERE id='REQUEST_ID' AND status='pending';"
