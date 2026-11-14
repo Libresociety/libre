@@ -14,7 +14,7 @@ const clean = (value: unknown, max: number) => typeof value === 'string' ? value
 async function currentUser(request: Request, env: Env) {
   const token = request.headers.get('Authorization')?.replace(/^Bearer\s+/i, '');
   if (!token) return null;
-  return (await env.DB.prepare('SELECT users.id, users.username FROM sessions JOIN users ON users.id = sessions.user_id WHERE token_hash = ? AND expires_at > ?').bind(await hash(token), Date.now()).first<{id:string;username:string}>()) || null;
+  return (await env.DB.prepare('SELECT users.id, users.username, users.is_admin FROM sessions JOIN users ON users.id = sessions.user_id WHERE token_hash = ? AND expires_at > ?').bind(await hash(token), Date.now()).first<{id:string;username:string;is_admin:number}>()) || null;
 }
 async function api(request: Request, env: Env, url: URL, origin: string): Promise<Response | null> {
   if (url.pathname === '/api/signup-requests' && request.method === 'POST') {
@@ -25,10 +25,7 @@ async function api(request: Request, env: Env, url: URL, origin: string): Promis
     const id=crypto.randomUUID(),salt=randomToken(16),passwordHash=await derivePassword(password,salt);
     await env.DB.prepare('INSERT INTO signup_requests(id,username,password_salt,password_hash) VALUES(?,?,?,?)').bind(id,username,salt,passwordHash).run();
     try {
-      const wrangler='npx wrangler d1 execute underground-terminal --remote --config worker/wrangler.toml --command';
-      const approveSql=`INSERT INTO users(id,username,password_salt,password_hash) SELECT r.id,r.username,r.password_salt,r.password_hash FROM signup_requests AS r WHERE r.id='${id}' AND r.status='pending' AND NOT EXISTS (SELECT 1 FROM users AS u WHERE u.username=r.username COLLATE NOCASE); UPDATE signup_requests SET status='approved' WHERE id='${id}' AND status='pending' AND EXISTS (SELECT 1 FROM users WHERE id='${id}');`;
-      const rejectSql=`UPDATE signup_requests SET status='rejected' WHERE id='${id}' AND status='pending';`;
-      const sent=await fetch('https://api.resend.com/emails',{method:'POST',headers:{Authorization:`Bearer ${env.RESEND_API_KEY}`,'Content-Type':'application/json'},body:JSON.stringify({from:'LibreSociety <onboarding@resend.dev>',to:env.SIGNUP_NOTICE_TO,subject:'LibreSociety signup request',text:`A new signup request needs your review.\n\nUsername: ${username}\nRequest ID: ${id}\nSubmitted: ${new Date().toISOString()}\n\nAPPROVE (run from the LibreSociety repository root):\n${wrangler} "${approveSql}"\n\nDENY (run from the LibreSociety repository root):\n${wrangler} "${rejectSql}"\n\nThese commands affect only this request ID. They require Wrangler authentication. No password or password hash is included in this email.`})});
+      const sent=await fetch('https://api.resend.com/emails',{method:'POST',headers:{Authorization:`Bearer ${env.RESEND_API_KEY}`,'Content-Type':'application/json'},body:JSON.stringify({from:'LibreSociety <onboarding@resend.dev>',to:env.SIGNUP_NOTICE_TO,subject:'LibreSociety signup request',text:`A new signup request needs your review.\n\nUsername: ${username}\nSubmitted: ${new Date().toISOString()}\n\nReview it in the LibreSociety admin panel: https://libresociety.github.io/libre/#admin\n\nSign in with an administrator account, then type admin in the terminal. No password or password hash is included in this email.`})});
       if(!sent.ok){console.error('Signup notification delivery failed',sent.status,(await sent.text()).slice(0,300));throw new Error('Email provider rejected the request.');}
     }
     catch { await env.DB.prepare('DELETE FROM signup_requests WHERE id=?').bind(id).run(); return json({error:'We could not send the review request. Please try again later.'},503,origin); }
@@ -39,14 +36,40 @@ async function api(request: Request, env: Env, url: URL, origin: string): Promis
   }
   if (url.pathname === '/api/login' && request.method === 'POST') {
     const input=await bodyJson(request); const username=clean(input?.username,20); const password=typeof input?.password==='string'?input.password:'';
-    const user=await env.DB.prepare('SELECT id, username, password_salt, password_hash FROM users WHERE username = ? COLLATE NOCASE').bind(username).first<{id:string;username:string;password_salt:string;password_hash:string}>();
+    const user=await env.DB.prepare('SELECT id, username, password_salt, password_hash, is_admin FROM users WHERE username = ? COLLATE NOCASE').bind(username).first<{id:string;username:string;password_salt:string;password_hash:string;is_admin:number}>();
     if (!user || !password || await derivePassword(password,user.password_salt)!==user.password_hash) return json({error:'Invalid username or password.'},401,origin);
     const token=randomToken(); await env.DB.prepare('INSERT INTO sessions (token_hash,user_id,expires_at) VALUES (?,?,?)').bind(await hash(token),user.id,Date.now()+30*86400000).run();
-    return json({token,user:{id:user.id,username:user.username}},200,origin);
+    return json({token,user:{id:user.id,username:user.username,isAdmin:Boolean(user.is_admin)}},200,origin);
   }
   if (url.pathname === '/api/logout' && request.method === 'POST') { const token=request.headers.get('Authorization')?.replace(/^Bearer\s+/i,''); if(token) await env.DB.prepare('DELETE FROM sessions WHERE token_hash=?').bind(await hash(token)).run(); return json({ok:true},200,origin); }
   const user = await currentUser(request,env);
-  if (url.pathname === '/api/me' && request.method === 'GET') return user ? json({user},200,origin) : json({error:'Sign in required.'},401,origin);
+  if (url.pathname === '/api/me' && request.method === 'GET') return user ? json({user:{id:user.id,username:user.username,isAdmin:Boolean(user.is_admin)}},200,origin) : json({error:'Sign in required.'},401,origin);
+  if (url.pathname === '/api/admin/signup-requests' && request.method === 'GET') {
+    if(!user)return json({error:'Sign in required.'},401,origin);
+    if(!user.is_admin)return json({error:'Administrator access required.'},403,origin);
+    const requests=await env.DB.prepare("SELECT id,username,submitted_at FROM signup_requests WHERE status='pending' ORDER BY submitted_at ASC LIMIT 100").all<{id:string;username:string;submitted_at:string}>();
+    return json(requests.results,200,origin);
+  }
+  const signupDecision=url.pathname.match(/^\/api\/admin\/signup-requests\/([a-f0-9-]{36})\/decision$/i);
+  if(signupDecision&&request.method==='POST'){
+    if(!user)return json({error:'Sign in required.'},401,origin);
+    if(!user.is_admin)return json({error:'Administrator access required.'},403,origin);
+    const input=await bodyJson(request),decision=input?.decision;
+    if(decision!=='approve'&&decision!=='deny')return json({error:'Decision must be approve or deny.'},400,origin);
+    const requestId=signupDecision[1];
+    if(decision==='deny'){
+      const result=await env.DB.prepare("UPDATE signup_requests SET status='rejected',decided_at=strftime('%Y-%m-%dT%H:%M:%fZ','now'),decided_by=? WHERE id=? AND status='pending'").bind(user.id,requestId).run();
+      return result.meta.changes?json({ok:true,status:'rejected'},200,origin):json({error:'Pending request not found.'},404,origin);
+    }
+    const pending=await env.DB.prepare("SELECT username FROM signup_requests WHERE id=? AND status='pending'").bind(requestId).first<{username:string}>();
+    if(!pending)return json({error:'Pending request not found.'},404,origin);
+    const results=await env.DB.batch([
+      env.DB.prepare("INSERT INTO users(id,username,password_salt,password_hash) SELECT r.id,r.username,r.password_salt,r.password_hash FROM signup_requests AS r WHERE r.id=? AND r.status='pending' AND NOT EXISTS (SELECT 1 FROM users AS existing WHERE existing.username=r.username COLLATE NOCASE)").bind(requestId),
+      env.DB.prepare("UPDATE signup_requests SET status='approved',decided_at=strftime('%Y-%m-%dT%H:%M:%fZ','now'),decided_by=? WHERE id=? AND status='pending' AND EXISTS (SELECT 1 FROM users WHERE id=?)").bind(user.id,requestId,requestId),
+    ]);
+    if(!results[0].meta.changes)return json({error:'That username has already been claimed. The request remains pending.'},409,origin);
+    return json({ok:true,status:'approved'},200,origin);
+  }
   if (url.pathname === '/api/profile' && request.method === 'PATCH') {
     if(!user) return json({error:'Sign in required.'},401,origin); const input=await bodyJson(request); const bio=clean(input?.bio,240);
     await env.DB.prepare('UPDATE users SET bio=? WHERE id=?').bind(bio,user.id).run(); return json({user:{...user,bio}},200,origin);
@@ -74,18 +97,18 @@ interface GameRow {
   credit: string;
 }
 
-const headers = (origin: string) => ({
+const headers = (origin: string, cacheControl = 'no-store') => ({
   'Access-Control-Allow-Origin': origin,
   'Access-Control-Allow-Methods': 'GET, POST, PUT, PATCH, DELETE, OPTIONS',
   'Access-Control-Allow-Headers': 'Content-Type, Authorization',
   'Access-Control-Max-Age': '86400',
   'Content-Type': 'application/json; charset=utf-8',
   'X-Content-Type-Options': 'nosniff',
-  'Cache-Control': 'public, max-age=60, stale-while-revalidate=300',
+  'Cache-Control': cacheControl,
 });
 
-function json(data: unknown, status: number, origin: string): Response {
-  return new Response(JSON.stringify(data), { status, headers: headers(origin) });
+function json(data: unknown, status: number, origin: string, cacheControl?: string): Response {
+  return new Response(JSON.stringify(data), { status, headers: headers(origin, cacheControl) });
 }
 
 function mapGame(row: GameRow) {
@@ -119,17 +142,17 @@ export default {
             OR tags LIKE ? ESCAPE '\\' COLLATE NOCASE
          ORDER BY title COLLATE NOCASE LIMIT 100`,
       ).bind(pattern, pattern, pattern, pattern).all<GameRow>();
-      return json(results.results.map(mapGame), 200, allowedOrigin);
+      return json(results.results.map(mapGame), 200, allowedOrigin, 'public, max-age=60, stale-while-revalidate=300');
     }
     if (category) {
       const results = await env.DB.prepare(
         'SELECT id, title, category, description, tags, url, credit FROM games WHERE category = ? COLLATE NOCASE ORDER BY title COLLATE NOCASE LIMIT 100',
       ).bind(category).all<GameRow>();
-      return json(results.results.map(mapGame), 200, allowedOrigin);
+      return json(results.results.map(mapGame), 200, allowedOrigin, 'public, max-age=60, stale-while-revalidate=300');
     }
     const results = await env.DB.prepare(
       'SELECT id, title, category, description, tags, url, credit FROM games ORDER BY title COLLATE NOCASE LIMIT 100',
     ).all<GameRow>();
-    return json(results.results.map(mapGame), 200, allowedOrigin);
+    return json(results.results.map(mapGame), 200, allowedOrigin, 'public, max-age=60, stale-while-revalidate=300');
   },
 } satisfies ExportedHandler<Env>;

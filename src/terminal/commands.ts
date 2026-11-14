@@ -38,6 +38,7 @@ const registry: Record<string, Command> = {
   register: { usage: 'register', description: 'Create an account', run: () => out('Choose a username and password in the secure registration form below. Passwords need at least 12 characters.') },
   profile: { usage: 'profile', description: 'View your account profile', run: () => out('Sign in to view your profile.') },
   submit: { usage: 'submit', description: 'Suggest a game for review', run: () => out('Sign in to submit a game suggestion for moderator review.') },
+  admin: { usage: 'admin', description: 'Open the administrator signup review panel', run: () => out('Opening the signup review panel.') },
   channels: { usage: 'channels', description: 'List public chat channels', run: () => out('general · games · study · Type chat <channel> to join. Sign in to post.') },
   chat: { usage: 'chat [channel]', description: 'View public chat or choose a channel', run: ([channel]) => out(`Public chat${channel ? ` / ${channel}` : ''}. Sign in to post messages.`) },
   who: { usage: 'who', description: 'View active chat users', run: () => out('Presence is available while viewing a chat channel.') },

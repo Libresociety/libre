@@ -53,15 +53,15 @@ Cloudflare account authentication is required only to create the hosted D1 datab
 
 ### Manual signup requests and private email notifications
 
-The public sign-up form stores a pending request with a salted password hash and sends a notification to the private destination configured in Worker secrets. No inbox address belongs in this repository or frontend configuration. Direct account creation is disabled. Each notification includes copy-paste `APPROVE` and `DENY` Wrangler commands scoped to its request ID. Run the chosen command from the repository root with Wrangler authenticated.
+The public sign-up form stores a pending request with a salted password hash and sends a notification to the private destination configured in Worker secrets. No inbox address belongs in this repository or frontend configuration. Direct account creation is disabled. Once your account has admin access, use `admin` in the terminal or the **admin** header button to approve or deny requests. Every decision is checked by the Worker.
 
-For reference, approval inserts the pending account only if its username has not been claimed, then marks the request approved. Denial only changes the matching pending request:
+There are currently no admin accounts by default. Bootstrap your own account once by submitting a signup request, copying its request ID from the notification, then running this from the repository root with Wrangler authenticated. This is the only normal approval flow that requires the CLI:
 
 ```sh
-npx wrangler d1 execute underground-terminal --remote --config worker/wrangler.toml --command "INSERT INTO users(id,username,password_salt,password_hash) SELECT id,username,password_salt,password_hash FROM signup_requests WHERE id='REQUEST_ID' AND status='pending'; UPDATE signup_requests SET status='approved' WHERE id='REQUEST_ID' AND status='pending';"
+npx wrangler d1 execute underground-terminal --remote --config worker/wrangler.toml --command "INSERT INTO users(id,username,password_salt,password_hash,is_admin) SELECT id,username,password_salt,password_hash,1 FROM signup_requests WHERE id='REQUEST_ID' AND status='pending' AND NOT EXISTS (SELECT 1 FROM users WHERE username=signup_requests.username COLLATE NOCASE); UPDATE signup_requests SET status='approved',decided_at=strftime('%Y-%m-%dT%H:%M:%fZ','now'),decided_by='REQUEST_ID' WHERE id='REQUEST_ID' AND status='pending' AND EXISTS (SELECT 1 FROM users WHERE id='REQUEST_ID');"
 ```
 
-Reject it by setting `status='rejected'` for that request ID. The account becomes usable after approval, with the password hash supplied in the original request.
+The first account becomes an administrator. Sign in, then use the panel for all future requests. The panel shows usernames and submission times only, confirms each choice, and never returns stored password hashes.
 
 Email delivery uses Resend's test sender, which does not need a custom domain but only delivers to the email address registered to your Resend account. Create a free Resend account using your private inbox, then create an API key. The free Resend plan has a published 3,000 monthly email quota with a 100 per day cap. Keep signup requests low volume and disable paid overages in Resend settings. Set the private values in Worker secrets, never in source control:
 
@@ -72,7 +72,7 @@ npx wrangler secret put RESEND_API_KEY --config worker/wrangler.toml
 
 Use the same email address for `SIGNUP_NOTICE_TO` and your Resend account email. The Worker sends from Resend's shared test address. Until both secrets are set, signup requests return a configuration error and no account is created. Do not put the inbox address or API key in `wrangler.toml`, frontend variables, or source control. Resend's shared sender only allows sending to the account's own email; sending to other recipients requires a verified domain. See [Resend pricing](https://resend.com/pricing) and [test email sending](https://resend.com/changelog/sending-test-emails).
 
-The API exposes `GET /api/health` and `GET /api/games` with optional `q` or `category` query parameters. Responses are capped at 100 rows. The endpoint is read-only; future submission endpoints must add validation, moderation, abuse controls, and authentication before accepting writes. D1 schema and sample seed data are in `worker/migrations/0001_create_games.sql`.
+The API exposes `GET /api/health`, `GET /api/games` with optional `q` or `category` query parameters, and admin-only signup review routes. Game directory responses are capped at 100 rows. D1 schema and sample seed data are in `worker/migrations/0001_create_games.sql`.
 
 ## Free static hosting fallback
 
@@ -80,10 +80,10 @@ The static frontend can still be hosted on Cloudflare Pages or GitHub Pages with
 
 ## Source map
 
-- `src/main.tsx`: responsive terminal UI and API loading with local fallback.
+- `src/main.tsx`: responsive terminal UI, API loading, and admin signup review panel.
 - `src/terminal/commands.ts`: pure command parser, completion, and typed results.
 - `src/catalog.ts`: local fallback sample catalog.
-- `worker/src/index.ts`: Cloudflare Worker API with D1-backed listing reads.
+- `worker/src/index.ts`: Cloudflare Worker API with D1-backed listings, authentication, and administrator authorization.
 - `worker/migrations/0001_create_games.sql`: D1 schema, indexes, and sample records.
 - `worker/wrangler.toml`: Worker and D1 configuration.
 - `public/_headers`: Cloudflare Pages security headers.

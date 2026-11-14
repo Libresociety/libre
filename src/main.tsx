@@ -5,11 +5,21 @@ import { api } from './api';
 import { complete, execute, setGameCatalog, themes, type Result, type Theme } from './terminal/commands';
 import './style.css';
 interface Entry { id: number; command: string; result: Result }
+interface Account { token: string; username: string; isAdmin: boolean }
+interface PendingSignup { id: string; username: string; submitted_at: string }
 function App() {
   const [games, setGames] = useState<Game[]>(localGames);
   const [directoryStatus, setDirectoryStatus] = useState('LOCAL CATALOG');
   const [accountMode, setAccountMode] = useState<'login'|'register'|null>(null);
-  const [account, setAccount] = useState<{token:string;username:string}|null>(()=>{try{return JSON.parse(localStorage.getItem('underground-account')||'null')}catch{return null}});
+  const [account, setAccount] = useState<Account|null>(()=>{try{return JSON.parse(localStorage.getItem('underground-account')||'null')}catch{return null}});
+  const [adminOpen, setAdminOpen] = useState(false);
+  const [adminRequests, setAdminRequests] = useState<PendingSignup[]>([]);
+  const [adminLoading, setAdminLoading] = useState(false);
+  const [adminRefresh, setAdminRefresh] = useState(0);
+  const [adminError, setAdminError] = useState('');
+  const [adminNotice, setAdminNotice] = useState('');
+  const [pendingDecision, setPendingDecision] = useState<{id:string;decision:'approve'|'deny'}|null>(null);
+  const [decisionBusy, setDecisionBusy] = useState(false);
   const [accountError, setAccountError] = useState('');
   const [requestSent, setRequestSent] = useState(false);
   const [entries, setEntries] = useState<Entry[]>([]);
@@ -35,8 +45,14 @@ function App() {
   }, []);
   useEffect(() => {
     if (!account) { setAccountMode('login'); return; }
-    api<{user:{username:string}}>('/me', account.token).then(({user})=>{if(user.username!==account.username)throw new Error('Session user mismatch');}).catch(()=>{localStorage.removeItem('underground-account');setAccount(null);setAccountMode('login');});
+    api<{user:{username:string;isAdmin:boolean}}>('/me', account.token).then(({user})=>{if(user.username!==account.username)throw new Error('Session user mismatch');const restored={...account,isAdmin:user.isAdmin};setAccount(restored);localStorage.setItem('underground-account',JSON.stringify(restored));if(user.isAdmin&&window.location.hash==='#admin')setAdminOpen(true);}).catch(()=>{localStorage.removeItem('underground-account');setAccount(null);setAccountMode('login');});
   }, []);
+  useEffect(() => {
+    if (!adminOpen || !account?.isAdmin) return;
+    let active=true;setAdminLoading(true);setAdminError('');
+    api<PendingSignup[]>('/admin/signup-requests',account.token).then(items=>{if(active)setAdminRequests(items);}).catch(error=>{if(active)setAdminError(error instanceof Error?error.message:'Could not load requests.');}).finally(()=>{if(active)setAdminLoading(false);});
+    return ()=>{active=false;};
+  }, [adminOpen,adminRefresh,account?.token,account?.isAdmin]);
   useEffect(() => { document.documentElement.dataset.theme = theme; try { localStorage.setItem('underground-theme', theme); } catch { /* Storage may be unavailable in private contexts. */ } }, [theme]);
   useEffect(() => { bottom.current?.scrollIntoView({ behavior: 'instant', block: 'end' }); }, [entries]);
   const run = (command: string) => {
@@ -45,6 +61,10 @@ function App() {
     const nextHistory = [...history, command].slice(-100);
     if (/^(login|register)\s*$/i.test(command.trim())) { setAccountMode(command.trim().toLowerCase() as 'login'|'register'); setAccountError(''); setEntries(prev=>[...prev,{id:++sequence.current,command,result:{lines:[command.trim().toLowerCase()==='login'?'Sign in below.':'Create your account below.']}}].slice(-150)); setHistory(nextHistory);setCursor(nextHistory.length);setInput(''); return; }
     const result = execute(command, { history: nextHistory });
+    if (/^admin\s*$/i.test(command.trim())) {
+      if (account?.isAdmin) { setAdminOpen(true); setAdminNotice(''); }
+      else { result.lines=['Administrator access required.']; }
+    }
     if (result.launch) {
       const tab = window.open(result.launch.url, '_blank', 'noopener,noreferrer');
       // A safe explicit link is also always rendered, including when popups are blocked.
@@ -60,14 +80,21 @@ function App() {
     const form = new FormData(event.currentTarget);
     const path = accountMode === 'register' ? '/signup-requests' : '/login';
     try {
-      const response = await api<{token?:string;user?:{username:string};message?:string}>(path, undefined, 'POST', {username:form.get('username'),password:form.get('password')});
+      const response = await api<{token?:string;user?:{username:string;isAdmin?:boolean};message?:string}>(path, undefined, 'POST', {username:form.get('username'),password:form.get('password')});
       if (accountMode === 'register') { setRequestSent(true); setAccountError(response.message || 'Request sent for manual review.'); return; }
       if (!response.token || !response.user) throw new Error('Unexpected sign-in response.');
-      const value={token:response.token,username:response.user.username}; setAccount(value); localStorage.setItem('underground-account',JSON.stringify(value)); setAccountMode(null); setAccountError(`Signed in as ${value.username}.`);
+      const value={token:response.token,username:response.user.username,isAdmin:Boolean(response.user.isAdmin)}; setAccount(value); localStorage.setItem('underground-account',JSON.stringify(value)); setAccountMode(null); setAccountError(`Signed in as ${value.username}.`);if(value.isAdmin&&window.location.hash==='#admin')setAdminOpen(true);
     } catch(error) { setAccountError(error instanceof Error?error.message:'Request failed.'); }
   };
+  const decideSignup = async () => {
+    if(!account?.isAdmin||!pendingDecision)return;
+    const action=pendingDecision;setDecisionBusy(true);setAdminError('');setAdminNotice('');
+    try { await api(`/admin/signup-requests/${action.id}/decision`,account.token,'POST',{decision:action.decision});setAdminRequests(items=>items.filter(item=>item.id!==action.id));setAdminNotice(action.decision==='approve'?'Account approved.':'Request denied.');setPendingDecision(null); }
+    catch(error){setAdminError(error instanceof Error?error.message:'Could not process this request.');}
+    finally{setDecisionBusy(false);}
+  };
   return <div className="app-shell">
-    <header className="masthead"><a href="./" aria-label="LibreSociety home" className="brand"><span className="brand-icon">[L_]</span> LIBRESOCIETY<span className="brand-sub"> / COMMUNITY TERMINAL</span></a><span className="local-status"><i/> {account?.username||'SIGN IN REQUIRED'} <span>{directoryStatus}</span>{!account&&<button onClick={()=>{setAccountMode('register');setAccountError('');setRequestSent(false);}}>sign up</button>}{account&&<button onClick={async()=>{try{await api('/logout',account.token,'POST')}finally{localStorage.removeItem('underground-account');setAccount(null);setAccountMode('login');setEntries([]);}}}>logout</button>}</span></header>
+    <header className="masthead"><a href="./" aria-label="LibreSociety home" className="brand"><span className="brand-icon">[L_]</span> LIBRESOCIETY<span className="brand-sub"> / COMMUNITY TERMINAL</span></a><span className="local-status"><i/> {account?.username||'SIGN IN REQUIRED'} <span>{directoryStatus}</span>{account?.isAdmin&&<button onClick={()=>{setAdminOpen(open=>!open);setAdminNotice('');}}>admin</button>}{!account&&<button onClick={()=>{setAccountMode('register');setAccountError('');setRequestSent(false);}}>sign up</button>}{account&&<button onClick={async()=>{try{await api('/logout',account.token,'POST')}finally{localStorage.removeItem('underground-account');setAccount(null);setAccountMode('login');setEntries([]);setAdminOpen(false);}}}>logout</button>}</span></header>
     <main>
       <div className="intro-label"><span>AN OPEN DOOR TO A SMALLER INTERNET</span><span>EST. 2026</span></div>
       <section className="terminal" aria-label="Interactive terminal">
@@ -82,6 +109,7 @@ function App() {
           <div className="session-divider"><span>SESSION STARTED</span><span>GUEST ACCESS · NO SIGN-IN REQUIRED</span></div>
           <div role="log" aria-label="Command output" aria-live="polite" aria-relevant="additions" className="output">{entries.map(entry => <div className="entry" key={entry.id}><div className="echo"><span>{account?.username||'guest'}<span className="muted">@</span>underground<span className="muted">:~$</span></span> {entry.command}</div><div className="result">{entry.result.lines.map((line,i) => <div key={i} className="output-line">{line || '\u00a0'}</div>)}{entry.result.games && entry.result.games.length > 0 && <div className="game-list"><div className="game-row table-heading"><span>ID / NAME</span><span>CATEGORY</span><span>LAUNCH</span></div>{entry.result.games.map(game => <div className="game-row" key={game.id}><span><strong>{game.title}</strong><small>{game.id}</small></span><span className="muted">{game.category}</span><button onClick={() => run(`play ${game.id}`)} aria-label={`Play ${game.title}`}>play ↗</button></div>)}</div>}{entry.result.launch && <a className="launch-link" href={entry.result.launch.url} target="_blank" rel="noopener noreferrer">Open {entry.result.launch.title} ↗ <span className="muted">(if the new tab did not open)</span></a>}</div></div>)}
             {accountMode && <form className="account-form" onSubmit={submitAccount}><h2>{accountMode==='register'?'Request an account':'Sign in'}</h2><p>{accountMode==='register'?'New accounts are manually reviewed. You can sign in after approval.':'Use your approved LibreSociety account.'}</p><label>username <input name="username" minLength={3} maxLength={20} required autoComplete="username" disabled={requestSent}/></label><label>password <input name="password" type="password" minLength={accountMode==='register'?12:1} maxLength={128} required autoComplete={accountMode==='register'?'new-password':'current-password'} disabled={requestSent}/></label><button type="submit" disabled={requestSent}>{requestSent?'request sent':accountMode==='register'?'send signup request':'sign in'}</button>{accountMode==='login'&&<button type="button" onClick={()=>{setAccountMode('register');setAccountError('');setRequestSent(false);}}>sign up</button>}<span role="status">{accountError}</span></form>}
+            {adminOpen&&account?.isAdmin&&<section className="admin-panel" aria-label="Signup request review"><div className="admin-panel-heading"><div><span className="admin-kicker">ADMIN / ACCESS REVIEW</span><h2>Signup requests</h2></div><div><button onClick={()=>{setAdminNotice('');setAdminOpen(false);}}>close</button><button onClick={()=>setAdminRefresh(value=>value+1)}>refresh</button></div></div>{adminLoading&&<p className="admin-state">Loading requests...</p>}{adminError&&<p className="admin-error" role="alert">{adminError}</p>}{adminNotice&&<p className="admin-notice" role="status">{adminNotice}</p>}{!adminLoading&&!adminError&&adminRequests.length===0&&<p className="admin-state">No pending signup requests.</p>}{adminRequests.map(request=><article className="signup-request" key={request.id}><div className="signup-request-meta"><strong>{request.username}</strong><time dateTime={request.submitted_at}>{new Date(request.submitted_at).toLocaleString()}</time><code>{request.id.slice(0,8)}</code></div>{pendingDecision?.id===request.id?<div className="signup-confirm" role="group" aria-label="Confirm signup decision"><span>{pendingDecision.decision==='approve'?`Approve ${request.username}?`:`Deny ${request.username}?`}</span><button disabled={decisionBusy} onClick={decideSignup}>confirm {pendingDecision.decision}</button><button disabled={decisionBusy} onClick={()=>setPendingDecision(null)}>cancel</button></div>:<div className="signup-actions"><button onClick={()=>{setAdminError('');setPendingDecision({id:request.id,decision:'approve'});}}>approve</button><button onClick={()=>{setAdminError('');setPendingDecision({id:request.id,decision:'deny'});}}>deny</button></div>}</article>)}</section>}
           </div>
           <form className="prompt" onSubmit={event => { event.preventDefault(); run(input); }}><label htmlFor="command"><span>guest</span>@underground<span className="muted">:~$</span></label><input ref={inputRef} id="command" autoFocus autoComplete="off" autoCapitalize="off" spellCheck={false} value={input} placeholder="type a command..." aria-label="Terminal command" onChange={e => setInput(e.target.value)} onKeyDown={e => {
             if (e.key === 'ArrowUp') { e.preventDefault(); if (cursor === history.length) setDraft(input); const next = Math.max(0,cursor-1); setCursor(next); setInput(history[next] ?? input); }
