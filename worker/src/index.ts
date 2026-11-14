@@ -2,6 +2,7 @@ import { derivePassword, hash, randomToken } from './security';
 export interface Env {
   DB: D1Database;
   ALLOWED_ORIGIN?: string;
+  IP_HASH_SECRET: string;
   RESEND_API_KEY: string;
   SIGNUP_NOTICE_TO: string;
   SIGNUP_NOTICE_FROM: string;
@@ -11,8 +12,28 @@ const bodyJson = async (request: Request): Promise<Record<string, unknown> | nul
   try { const value: unknown = await request.json(); return value && typeof value === 'object' && !Array.isArray(value) ? value as Record<string, unknown> : null; } catch { return null; }
 };
 const clean = (value: unknown, max: number) => typeof value === 'string' ? value.trim().slice(0, max) : '';
+const SESSION_SECONDS = 7 * 24 * 60 * 60;
+function sessionToken(request: Request) {
+  const bearer = request.headers.get('Authorization')?.replace(/^Bearer\s+/i, '');
+  if (bearer) return bearer;
+  return (request.headers.get('Cookie') || '').match(/(?:^|;\s*)ls_session=([^;]+)/)?.[1] || '';
+}
+function sessionCookie(request: Request, token: string, clear = false) {
+  const secure = new URL(request.url).protocol === 'https:';
+  return `ls_session=${clear ? '' : token}; Path=/api; HttpOnly; SameSite=${secure ? 'None' : 'Lax'}${secure ? '; Secure; Partitioned' : ''}; Max-Age=${clear ? 0 : SESSION_SECONDS}`;
+}
+async function clientIpHash(request: Request, secret: string) {
+  const ip = request.headers.get('CF-Connecting-IP')?.trim();
+  if (!ip || !secret) return null;
+  let normalizedIp: string;
+  try { normalizedIp = new URL(`http://${ip.includes(':') ? `[${ip}]` : ip}`).hostname.replace(/^\[|\]$/g,'').toLowerCase(); }
+  catch { return null; }
+  const key = await crypto.subtle.importKey('raw', new TextEncoder().encode(secret), {name:'HMAC',hash:'SHA-256'}, false, ['sign']);
+  const digest = new Uint8Array(await crypto.subtle.sign('HMAC', key, new TextEncoder().encode(normalizedIp)));
+  return btoa(String.fromCharCode(...digest)).replaceAll('+','-').replaceAll('/','_').replaceAll('=','');
+}
 async function currentUser(request: Request, env: Env) {
-  const token = request.headers.get('Authorization')?.replace(/^Bearer\s+/i, '');
+  const token = sessionToken(request);
   if (!token) return null;
   return (await env.DB.prepare('SELECT users.id, users.username, users.is_admin FROM sessions JOIN users ON users.id = sessions.user_id WHERE token_hash = ? AND expires_at > ?').bind(await hash(token), Date.now()).first<{id:string;username:string;is_admin:number}>()) || null;
 }
@@ -21,9 +42,13 @@ async function api(request: Request, env: Env, url: URL, origin: string): Promis
     const input=await bodyJson(request); const username=clean(input?.username,20); const password=typeof input?.password==='string'?input.password:'';
     if(!/^[A-Za-z0-9_]{3,20}$/.test(username)||password.length<12||password.length>128)return json({error:'Use a username of 3 to 20 letters, digits, or underscores, and a password of at least 12 characters.'},400,origin);
     if(!env.RESEND_API_KEY||!env.SIGNUP_NOTICE_TO)return json({error:'Signup notifications are not configured yet. Please try again later.'},503,origin);
+    const ipHash=await clientIpHash(request,env.IP_HASH_SECRET);
+    if(!ipHash)return json({error:'Signup is temporarily unavailable because IP verification is not configured.'},503,origin);
+    if(await env.DB.prepare("SELECT id FROM users WHERE ip_hash=? UNION SELECT id FROM signup_requests WHERE ip_hash=? AND status='pending'").bind(ipHash,ipHash).first())return json({error:'Only one account can be requested or used from each IP address.'},409,origin);
     if(await env.DB.prepare("SELECT id FROM users WHERE username=? COLLATE NOCASE UNION SELECT id FROM signup_requests WHERE username=? COLLATE NOCASE AND status='pending'").bind(username,username).first())return json({error:'That username is already in use or awaiting review.'},409,origin);
     const id=crypto.randomUUID(),salt=randomToken(16),passwordHash=await derivePassword(password,salt);
-    await env.DB.prepare('INSERT INTO signup_requests(id,username,password_salt,password_hash) VALUES(?,?,?,?)').bind(id,username,salt,passwordHash).run();
+    try { await env.DB.prepare('INSERT INTO signup_requests(id,username,password_salt,password_hash,ip_hash) VALUES(?,?,?,?,?)').bind(id,username,salt,passwordHash,ipHash).run(); }
+    catch { return json({error:'Only one account can be requested or used from each IP address.'},409,origin); }
     try {
       const sent=await fetch('https://api.resend.com/emails',{method:'POST',headers:{Authorization:`Bearer ${env.RESEND_API_KEY}`,'Content-Type':'application/json'},body:JSON.stringify({from:'LibreSociety <onboarding@resend.dev>',to:env.SIGNUP_NOTICE_TO,subject:'LibreSociety signup request',text:`A new signup request needs your review.\n\nUsername: ${username}\nSubmitted: ${new Date().toISOString()}\n\nReview it in the LibreSociety admin panel: https://libresociety.github.io/libre/#admin\n\nSign in with an administrator account, then type admin in the terminal. No password or password hash is included in this email.`})});
       if(!sent.ok){console.error('Signup notification delivery failed',sent.status,(await sent.text()).slice(0,300));throw new Error('Email provider rejected the request.');}
@@ -36,12 +61,13 @@ async function api(request: Request, env: Env, url: URL, origin: string): Promis
   }
   if (url.pathname === '/api/login' && request.method === 'POST') {
     const input=await bodyJson(request); const username=clean(input?.username,20); const password=typeof input?.password==='string'?input.password:'';
-    const user=await env.DB.prepare('SELECT id, username, password_salt, password_hash, is_admin FROM users WHERE username = ? COLLATE NOCASE').bind(username).first<{id:string;username:string;password_salt:string;password_hash:string;is_admin:number}>();
+    const user=await env.DB.prepare('SELECT id, username, password_salt, password_hash, is_admin, ip_hash FROM users WHERE username = ? COLLATE NOCASE').bind(username).first<{id:string;username:string;password_salt:string;password_hash:string;is_admin:number;ip_hash:string|null}>();
     if (!user || !password || await derivePassword(password,user.password_salt)!==user.password_hash) return json({error:'Invalid username or password.'},401,origin);
-    const token=randomToken(); await env.DB.prepare('INSERT INTO sessions (token_hash,user_id,expires_at) VALUES (?,?,?)').bind(await hash(token),user.id,Date.now()+30*86400000).run();
-    return json({token,user:{id:user.id,username:user.username,isAdmin:Boolean(user.is_admin)}},200,origin);
+    if(!user.ip_hash){const ipHash=await clientIpHash(request,env.IP_HASH_SECRET);if(ipHash)try{await env.DB.prepare('UPDATE users SET ip_hash=? WHERE id=? AND ip_hash IS NULL').bind(ipHash,user.id).run();}catch{/* Existing accounts may share an address before IP enforcement. */}}
+    const token=randomToken(); await env.DB.prepare('INSERT INTO sessions (token_hash,user_id,expires_at) VALUES (?,?,?)').bind(await hash(token),user.id,Date.now()+SESSION_SECONDS*1000).run();
+    return json({user:{id:user.id,username:user.username,isAdmin:Boolean(user.is_admin)}},200,origin,undefined,{'Set-Cookie':sessionCookie(request,token)});
   }
-  if (url.pathname === '/api/logout' && request.method === 'POST') { const token=request.headers.get('Authorization')?.replace(/^Bearer\s+/i,''); if(token) await env.DB.prepare('DELETE FROM sessions WHERE token_hash=?').bind(await hash(token)).run(); return json({ok:true},200,origin); }
+  if (url.pathname === '/api/logout' && request.method === 'POST') { const token=sessionToken(request); if(token) await env.DB.prepare('DELETE FROM sessions WHERE token_hash=?').bind(await hash(token)).run(); return json({ok:true},200,origin,undefined,{'Set-Cookie':sessionCookie(request,'',true)}); }
   const user = await currentUser(request,env);
   if (url.pathname === '/api/me' && request.method === 'GET') return user ? json({user:{id:user.id,username:user.username,isAdmin:Boolean(user.is_admin)}},200,origin) : json({error:'Sign in required.'},401,origin);
   if (url.pathname === '/api/admin/signup-requests' && request.method === 'GET') {
@@ -64,10 +90,10 @@ async function api(request: Request, env: Env, url: URL, origin: string): Promis
     const pending=await env.DB.prepare("SELECT username FROM signup_requests WHERE id=? AND status='pending'").bind(requestId).first<{username:string}>();
     if(!pending)return json({error:'Pending request not found.'},404,origin);
     const results=await env.DB.batch([
-      env.DB.prepare("INSERT INTO users(id,username,password_salt,password_hash) SELECT r.id,r.username,r.password_salt,r.password_hash FROM signup_requests AS r WHERE r.id=? AND r.status='pending' AND NOT EXISTS (SELECT 1 FROM users AS existing WHERE existing.username=r.username COLLATE NOCASE)").bind(requestId),
+      env.DB.prepare("INSERT INTO users(id,username,password_salt,password_hash,ip_hash) SELECT r.id,r.username,r.password_salt,r.password_hash,r.ip_hash FROM signup_requests AS r WHERE r.id=? AND r.status='pending' AND NOT EXISTS (SELECT 1 FROM users AS existing WHERE existing.username=r.username COLLATE NOCASE OR existing.ip_hash=r.ip_hash)").bind(requestId),
       env.DB.prepare("UPDATE signup_requests SET status='approved',decided_at=strftime('%Y-%m-%dT%H:%M:%fZ','now'),decided_by=? WHERE id=? AND status='pending' AND EXISTS (SELECT 1 FROM users WHERE id=?)").bind(user.id,requestId,requestId),
     ]);
-    if(!results[0].meta.changes)return json({error:'That username has already been claimed. The request remains pending.'},409,origin);
+    if(!results[0].meta.changes)return json({error:'That username or IP address is already associated with an account. The request remains pending.'},409,origin);
     return json({ok:true,status:'approved'},200,origin);
   }
   if (url.pathname === '/api/profile' && request.method === 'PATCH') {
@@ -99,16 +125,18 @@ interface GameRow {
 
 const headers = (origin: string, cacheControl = 'no-store') => ({
   'Access-Control-Allow-Origin': origin,
+  'Access-Control-Allow-Credentials': 'true',
+  'Vary': 'Origin',
   'Access-Control-Allow-Methods': 'GET, POST, PUT, PATCH, DELETE, OPTIONS',
-  'Access-Control-Allow-Headers': 'Content-Type, Authorization',
+  'Access-Control-Allow-Headers': 'Content-Type, Authorization, X-LibreSociety-Request',
   'Access-Control-Max-Age': '86400',
   'Content-Type': 'application/json; charset=utf-8',
   'X-Content-Type-Options': 'nosniff',
   'Cache-Control': cacheControl,
 });
 
-function json(data: unknown, status: number, origin: string, cacheControl?: string): Response {
-  return new Response(JSON.stringify(data), { status, headers: headers(origin, cacheControl) });
+function json(data: unknown, status: number, origin: string, cacheControl?: string, extraHeaders?: Record<string,string>): Response {
+  return new Response(JSON.stringify(data), { status, headers: {...headers(origin, cacheControl), ...extraHeaders} });
 }
 
 function mapGame(row: GameRow) {
@@ -118,8 +146,9 @@ function mapGame(row: GameRow) {
 export default {
   async fetch(request: Request, env: Env): Promise<Response> {
     const origin = request.headers.get('Origin');
-    const allowedOrigin = env.ALLOWED_ORIGIN || '*';
-    if (origin && allowedOrigin !== '*' && origin !== allowedOrigin) {
+    const allowedOrigins = [env.ALLOWED_ORIGIN || 'https://libresociety.github.io','http://localhost:5173','http://127.0.0.1:5173'];
+    const allowedOrigin = origin && allowedOrigins.includes(origin) ? origin : (env.ALLOWED_ORIGIN || 'https://libresociety.github.io');
+    if (origin && !allowedOrigins.includes(origin)) {
       return json({ error: 'Origin not allowed' }, 403, allowedOrigin);
     }
     if (request.method === 'OPTIONS') return new Response(null, { status: 204, headers: headers(allowedOrigin) });
