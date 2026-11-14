@@ -1,0 +1,10 @@
+export interface Game { id: string; title: string; category: string; description: string; tags: string[]; url: string; credit: string }
+// Links to original creators; no game code or assets are redistributed.
+export const games: Game[] = [
+  { id: '2048', title: '2048', category: 'puzzle', description: 'Slide numbered tiles. Combine matching pairs. Chase the elusive 2048.', tags: ['numbers', 'single-player', 'keyboard'], url: 'https://play2048.co/', credit: 'Gabriele Cirulli · MIT open-source project' },
+  { id: 'hextris', title: 'Hextris', category: 'arcade', description: 'Rotate a hexagon and match falling colors before the stack gets out of hand.', tags: ['reflex', 'colors', 'single-player'], url: 'https://hextris.io/', credit: 'Hextris contributors · open-source project' },
+  { id: 'hexgl', title: 'HexGL', category: 'racing', description: 'A futuristic browser racing game. Best experienced with a desktop keyboard.', tags: ['3d', 'racing', 'keyboard'], url: 'https://hexgl.bkcore.com/play/', credit: 'Thibaut Despoulain / BKcore · original creator site' },
+  { id: 'mines', title: 'Minesweeper', category: 'puzzle', description: 'Read the numbers, flag the mines, and clear the board.', tags: ['logic', 'classic', 'single-player'], url: 'https://www.chiark.greenend.org.uk/~sgtatham/puzzles/js/mines.html', credit: 'Simon Tatham’s Portable Puzzle Collection · MIT' },
+  { id: 'net', title: 'Net', category: 'strategy', description: 'Rotate the tiles to connect every part of a tangled network.', tags: ['logic', 'network', 'single-player'], url: 'https://www.chiark.greenend.org.uk/~sgtatham/puzzles/js/net.html', credit: 'Simon Tatham’s Portable Puzzle Collection · MIT' },
+  { id: 'towers', title: 'Towers', category: 'puzzle', description: 'Place skyscrapers on a grid and solve the skyline clues.', tags: ['logic', 'numbers', 'single-player'], url: 'https://www.chiark.greenend.org.uk/~sgtatham/puzzles/js/towers.html', credit: 'Simon Tatham’s Portable Puzzle Collection · MIT' },
+].sort((a, b) => a.title.localeCompare(b.title));
