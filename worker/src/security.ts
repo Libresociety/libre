@@ -8,6 +8,7 @@ export async function hash(value: string): Promise<string> {
 }
 export async function derivePassword(password: string, salt: string): Promise<string> {
   const key = await crypto.subtle.importKey('raw', encoder.encode(password), 'PBKDF2', false, ['deriveBits']);
-  const bits = await crypto.subtle.deriveBits({ name: 'PBKDF2', salt: fromBase64(salt), iterations: 310_000, hash: 'SHA-256' }, key, 256);
+  // Cloudflare Workers Web Crypto caps PBKDF2 at 100,000 iterations.
+  const bits = await crypto.subtle.deriveBits({ name: 'PBKDF2', salt: fromBase64(salt), iterations: 100_000, hash: 'SHA-256' }, key, 256);
   return toBase64(new Uint8Array(bits));
 }

@@ -99,7 +99,7 @@ export default {
     if (request.method === 'OPTIONS') return new Response(null, { status: 204, headers: headers(allowedOrigin) });
     const url = new URL(request.url);
     try { const response = await api(request, env, url, allowedOrigin); if(response) return response; }
-    catch { return json({error:'Request could not be completed.'},500,allowedOrigin); }
+    catch (error) { console.error('API request failed', error instanceof Error ? error.message : 'Unknown error'); return json({error:'Request could not be completed.'},500,allowedOrigin); }
     if (request.method !== 'GET') return json({ error: 'Method not allowed' }, 405, allowedOrigin);
     if (url.pathname === '/api/health') return json({ ok: true }, 200, allowedOrigin);
     if (url.pathname !== '/api/games') return json({ error: 'Not found' }, 404, allowedOrigin);
