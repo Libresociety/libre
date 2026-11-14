@@ -21,12 +21,6 @@ async function api(request: Request, env: Env, url: URL, origin: string): Promis
     const input=await bodyJson(request); const username=clean(input?.username,20); const password=typeof input?.password==='string'?input.password:'';
     if(!/^[A-Za-z0-9_]{3,20}$/.test(username)||password.length<12||password.length>128)return json({error:'Use a username of 3 to 20 letters, digits, or underscores, and a password of at least 12 characters.'},400,origin);
     if(!env.RESEND_API_KEY||!env.SIGNUP_NOTICE_TO)return json({error:'Signup notifications are not configured yet. Please try again later.'},503,origin);
-    const ip=request.headers.get('CF-Connecting-IP')||'unknown',ipHash=await hash(ip),now=Date.now();
-    const rate=await env.DB.prepare('SELECT window_started_at,request_count FROM signup_rate_limits WHERE ip_hash=?').bind(ipHash).first<{window_started_at:number;request_count:number}>();
-    if(rate&&rate.window_started_at>now-3600000&&rate.request_count>=3)return json({error:'Too many signup requests. Try again in an hour.'},429,origin);
-    await env.DB.prepare(`INSERT INTO signup_rate_limits(ip_hash,window_started_at,request_count) VALUES(?,?,1)
-      ON CONFLICT(ip_hash) DO UPDATE SET window_started_at=CASE WHEN window_started_at<=? THEN excluded.window_started_at ELSE window_started_at END,
-      request_count=CASE WHEN window_started_at<=? THEN 1 ELSE request_count+1 END`).bind(ipHash,now,now-3600000,now-3600000).run();
     if(await env.DB.prepare("SELECT id FROM users WHERE username=? COLLATE NOCASE UNION SELECT id FROM signup_requests WHERE username=? COLLATE NOCASE AND status='pending'").bind(username,username).first())return json({error:'That username is already in use or awaiting review.'},409,origin);
     const id=crypto.randomUUID(),salt=randomToken(16),passwordHash=await derivePassword(password,salt);
     await env.DB.prepare('INSERT INTO signup_requests(id,username,password_salt,password_hash) VALUES(?,?,?,?)').bind(id,username,salt,passwordHash).run();
